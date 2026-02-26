@@ -21,6 +21,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Lowercase Repo Name
+        run: |
+          echo "IMAGE_ID=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Build image locally
         run: |
           docker build -t target-image .
@@ -50,7 +54,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.event.repository.html_url }}
+            ghcr.io/${{ env.IMAGE_ID }}:latest
+            ghcr.io/${{ env.IMAGE_ID }}:${{ github.sha }}
