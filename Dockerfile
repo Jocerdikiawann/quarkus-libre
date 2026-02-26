@@ -9,12 +9,12 @@ ENV NO_UPDATE_NOTIFIER=true \
   PATH="/usr/lib/libreoffice/program:${PATH}"
 
 RUN apk add --no-cache \
-    openjdk-17 \
-    libreoffice \
-    ttf-dejavu \
-    fontconfig \
-    && fc-cache -fv && \
-    rm -rf /var/cache/apk/*
+  openjdk-17 \
+  libreoffice \
+  ttf-dejavu \
+  fontconfig \
+  && fc-cache -fv && \
+  rm -rf /var/cache/apk/*
 
 RUN apk --no-cache add msttcorefonts-installer fontconfig && \
   update-ms-fonts && \
@@ -40,6 +40,10 @@ ENV LANG=C.UTF-8 \
 WORKDIR /app
 
 RUN apk add --no-cache shadow
+
+
+RUN soffice --headless --version && echo "LibreOffice check version OK"
+RUN java -version && echo "Java OK"
 
 RUN echo "=== Test 1. As root ===" && \
   mkdir -p /tmp/.config-root && \
@@ -71,11 +75,11 @@ RUN apk del shadow && rm -rf /var/cache/apk/*
 RUN rm -rf /tmp/.config-*
 
 ENTRYPOINT ["java", \
-"-XX:+UseZGC", \
-"-XX:InitialRAMPercentage=50.0",\
-"-XX:MaxRAMPercentage=80.0",\
-"-Djava.awt.headless=true",\
-"-Dquarkus.http.host=0.0.0.0",\
-"-jar"]
+  "-XX:+UseZGC", \
+  "-XX:InitialRAMPercentage=50.0",\
+  "-XX:MaxRAMPercentage=80.0",\
+  "-Djava.awt.headless=true",\
+  "-Dquarkus.http.host=0.0.0.0",\
+  "-jar"]
 
 CMD ["app.jar"]
