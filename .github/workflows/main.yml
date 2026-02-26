@@ -22,7 +22,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Lowercase Repo Name
-        run: echo "IMAGE_ID=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        run: |
+          echo "IMAGE_ID=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Build image locally
+        run: |
+          docker build -t target-image .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'target-image'
+          format: 'table'
+          exit-code: '1' 
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Log in to the Container registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker meta
         id: meta
@@ -36,11 +59,12 @@ jobs:
             type=sha,format=short
             type=raw,value=build-${{ github.run_number }}
 
-      - name: Build and push
+      - name: Build and push Docker image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ghcr.io/${{ env.IMAGE_ID }}:${{ steps.meta.outputs.tags }}
+            ghcr.io/${{ env.IMAGE_ID }}:${{ github.sha }}
