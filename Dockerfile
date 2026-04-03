@@ -9,7 +9,7 @@ ENV NO_UPDATE_NOTIFIER=true \
   PATH="/usr/lib/libreoffice/program:${PATH}"
 
 RUN apk add --no-cache \
-  openjdk-17 \
+  openjdk-26 \
   libreoffice \
   ttf-dejavu \
   fontconfig \
@@ -30,8 +30,8 @@ RUN chmod 1777 /tmp
 
 ENV LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
-  JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
-  PATH=$PATH:/usr/lib/jvm/java-17-openjdk/bin \
+  JAVA_HOME=/usr/lib/jvm/java-26-openjdk \
+  PATH=$PATH:/usr/lib/jvm/java-26-openjdk/bin \
   HOME=/tmp \
   SAL_NO_X11=1 \
   SAL_USE_VCLPLUGIN=svp \
