@@ -19,6 +19,11 @@ ENV PATH="${PATH}:/usr/lib/jvm/java-25-openjdk/bin"
 
 RUN apk update && apk upgrade --no-cache && \
   apk add --no-cache \
+  busybox \
+  glibc \
+  glibc-locale-posix \
+  openssl \
+  libcrypt1 \
   openjdk-25 \
   libreoffice \
   ttf-dejavu \
@@ -27,7 +32,7 @@ RUN apk update && apk upgrade --no-cache && \
   shadow && \
   update-ms-fonts && \
   fc-cache -fv && \
-  apk del msttcorefonts-installer py3-pip shadow || true && \
+  apk del msttcorefonts-installer py3-pip || true && \
   rm -rf /var/cache/apk/* /tmp/*
 
 RUN mkdir -p /app && \
@@ -49,8 +54,7 @@ RUN echo "=== Test 1. As root ===" && \
   echo "Root conversion ok" && \
   rm -rf /app/test-root.* /tmp/.config-root
 
-RUN apk add --no-cache shadow && \
-  useradd -u 1000 -g 0 test1000 && \
+RUN useradd -u 1000 -g 0 test1000 && \
   echo "=== Test 2. As UID 1000 ===" && \
   su test1000 -c "mkdir -p /tmp/.config-1000" && \
   su test1000 -c "echo 'test 1000' > /app/test-1000.txt" && \
@@ -66,7 +70,6 @@ RUN apk add --no-cache shadow && \
   su test1001 -c "soffice -env:UserInstallation=file:///tmp/.config-1001 --convert-to pdf --outdir /app /app/test-1001.txt" && \
   echo "1001 conversion ok" && \
   rm -rf /app/test-1001.* /tmp/.config-1001 && \
-  userdel test1001 && \
   apk del shadow && \
   rm -rf /var/cache/apk/*
 
