@@ -80,6 +80,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: quarkus-distroless:ci-amd64
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfi-java25-sbom
+          path: sbom.spdx.json
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Compare local and remote image
         id: compare
         shell: bash
