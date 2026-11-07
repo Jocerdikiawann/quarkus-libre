@@ -80,33 +80,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compare image configuration digest
+      - name: Compare local and remote image
         id: compare
         shell: bash
         env:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/${OWNER,,}/wolfi-jdk-distroless"
-          LOCAL_CONFIG="$(docker image inspect wolfi-jdk-distroless:ci-amd64 --format '{{.Id}}')"
-          echo "Local config digest: $LOCAL_CONFIG"
 
-          if crane manifest "$IMAGE:latest" > remote-manifest.json 2> registry-error.log; then
-            REMOTE_CONFIG="$(jq -er '.config.digest' remote-manifest.json)"
-            echo "Remote config digest: $REMOTE_CONFIG"
-            if [[ "$LOCAL_CONFIG" == "$REMOTE_CONFIG" ]]; then
-              echo 'changed=false' >> "$GITHUB_OUTPUT"
-              echo 'No image content/config change. Skipping publish.'
+          IMAGE="ghcr.io/${OWNER,,}/wolfi-jdk-distroless"
+          LOCAL_IMAGE="wolfi-jdk:ci-amd64"
+
+          LOCAL_ID=$(docker image inspect "$LOCAL_IMAGE" \
+            --format '{{.Id}}')
+
+          echo "Local image ID: $LOCAL_ID"
+
+          if docker manifest inspect "$IMAGE:latest" \
+            >/dev/null 2>&1; then
+
+            docker pull "$IMAGE:latest"
+
+            REMOTE_ID=$(docker image inspect "$IMAGE:latest" \
+              --format '{{.Id}}')
+
+            echo "Remote image ID: $REMOTE_ID"
+
+            if [[ "$LOCAL_ID" == "$REMOTE_ID" ]]; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "Image unchanged. Skipping publish."
             else
-              echo 'changed=true' >> "$GITHUB_OUTPUT"
-              echo 'Image changed. Publishing is required.'
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "Image changed. Publishing required."
             fi
-          elif grep -Eqi '404|MANIFEST_UNKNOWN|NAME_UNKNOWN|not found' registry-error.log; then
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-            echo 'No existing image found. First publish is required.'
+
           else
-            cat registry-error.log >&2
-            exit 1
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Remote image not found. First publish required."
           fi
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
