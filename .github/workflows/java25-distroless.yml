@@ -89,7 +89,7 @@ jobs:
           set -euo pipefail
 
           IMAGE="ghcr.io/${OWNER,,}/wolfi-jdk-distroless"
-          LOCAL_IMAGE="wolfi-jdk:ci-amd64"
+          LOCAL_IMAGE="wolfi-jdk-distroless:ci-amd64"
 
           LOCAL_ID=$(docker image inspect "$LOCAL_IMAGE" \
             --format '{{.Id}}')
