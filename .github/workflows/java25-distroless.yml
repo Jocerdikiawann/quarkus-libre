@@ -84,7 +84,7 @@ jobs:
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
-          image: quarkus-distroless:ci-amd64
+          image: wolfi-jdk-distroless:ci-amd64
           format: spdx-json
           output-file: sbom.spdx.json
           upload-artifact: false
