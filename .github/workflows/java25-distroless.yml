@@ -1,0 +1,123 @@
+
+name: Wolfi Java 25 Distroless
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apko.yaml'
+      - '.github/workflows/distroless.yml'
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wolfi-java25-distroless
+  cancel-in-progress: false
+
+jobs:
+  build-scan-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      # Before production, pin these tools to tested release versions.
+      - name: Install apko and crane
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install chainguard.dev/apko@latest
+          go install github.com/google/go-containerregistry/cmd/crane@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build image with apko
+        shell: bash
+        run: |
+          set -euo pipefail
+          apko build apko.yaml wolfi-jdk-distroless:ci image.tar --arch x86_64
+          docker load -i image.tar
+          docker image inspect wolfi-jdk-distroless:ci-amd64 >/dev/null
+
+      - name: Java smoke test
+        run: docker run --rm wolfi-jdk-distroless:ci-amd64
+
+      - name: Verify non-root runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          USER_ID="$(docker image inspect wolfi-jdk-distroless:ci-amd64 --format '{{.Config.User}}')"
+          test "$USER_ID" = '65532' || test "$USER_ID" = 'nonroot'
+          echo "Runtime user: $USER_ID"
+
+      - name: Scan all known vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: wolfi-jdk-distroless:ci-amd64
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: '1'
+          ignore-unfixed: false
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare image configuration digest
+        id: compare
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${OWNER,,}/wolfi-jdk-distroless"
+          LOCAL_CONFIG="$(docker image inspect wolfi-jdk-distroless:ci-amd64 --format '{{.Id}}')"
+          echo "Local config digest: $LOCAL_CONFIG"
+
+          if crane manifest "$IMAGE:latest" > remote-manifest.json 2> registry-error.log; then
+            REMOTE_CONFIG="$(jq -er '.config.digest' remote-manifest.json)"
+            echo "Remote config digest: $REMOTE_CONFIG"
+            if [[ "$LOCAL_CONFIG" == "$REMOTE_CONFIG" ]]; then
+              echo 'changed=false' >> "$GITHUB_OUTPUT"
+              echo 'No image content/config change. Skipping publish.'
+            else
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+              echo 'Image changed. Publishing is required.'
+            fi
+          elif grep -Eqi '404|MANIFEST_UNKNOWN|NAME_UNKNOWN|not found' registry-error.log; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            echo 'No existing image found. First publish is required.'
+          else
+            cat registry-error.log >&2
+            exit 1
+          fi
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish changed image
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker tag wolfi-jdk-distroless:ci-amd64 "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+          echo "Published $IMAGE:latest"
