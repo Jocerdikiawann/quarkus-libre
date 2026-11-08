@@ -188,3 +188,128 @@ jobs:
             fi
           done
           echo "remote_multi=$remote_multi" >> "$GITHUB_OUTPUT"
+      - name: Generate previous platform SBOMs
+        if: steps.compare.outputs.changed == 'true' && steps.compare.outputs.remote_multi == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker pull --platform "linux/$arch" "$IMAGE:latest"
+            docker tag "$IMAGE:latest" "wolfi-jdk-distroless:previous-${arch}"
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD:/workspace" -w /workspace \
+              "$SYFT_IMAGE" \
+              "docker:wolfi-jdk-distroless:previous-${arch}" \
+              -o "spdx-json=/workspace/previous-${arch}.spdx.json"
+          done
+
+      - name: Compare APK package versions
+        if: steps.compare.outputs.changed == 'true' && steps.compare.outputs.remote_multi == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            python3 compare_sbom.py \
+              "previous-${arch}.spdx.json" \
+              "sbom-${arch}.spdx.json"
+            mv package-report.md "package-report-${arch}.md"
+            printf '\n## Platform: linux/%s\n\n' "$arch" >> "$GITHUB_STEP_SUMMARY"
+            cat "package-report-${arch}.md" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload package change reports
+        if: steps.compare.outputs.changed == 'true' && steps.compare.outputs.remote_multi == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfi-java25-package-changes
+          path: package-report-*.md
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.0.0
+
+      - name: Publish OCI index when changed
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+          STAGE="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for arch in amd64 arm64; do
+            docker tag "wolfi-jdk-distroless:ci-${arch}" "$IMAGE:${STAGE}-${arch}"
+            docker push "$IMAGE:${STAGE}-${arch}"
+          done
+          docker buildx imagetools create \
+            -t "$IMAGE:latest" \
+            "$IMAGE:${STAGE}-amd64" \
+            "$IMAGE:${STAGE}-arm64"
+          docker buildx imagetools inspect "$IMAGE:latest"
+
+      - name: Sign OCI index when changed
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+          INDEX_DIGEST="$(crane digest "$IMAGE:latest")"
+          cosign sign --yes "$IMAGE@$INDEX_DIGEST"
+
+      - name: Attest both platform SBOMs when changed
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            PLATFORM_DIGEST="$(crane digest --platform "linux/$arch" "$IMAGE:latest")"
+            cosign attest --yes \
+              --type spdxjson \
+              --predicate "sbom-${arch}.spdx.json" \
+              "$IMAGE@$PLATFORM_DIGEST"
+          done
+
+      - name: Verify index signature and platform SBOM attestations
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/java25-distroless.yml@refs/heads/main"
+          ISSUER='https://token.actions.githubusercontent.com'
+          INDEX_DIGEST="$(crane digest "$IMAGE:latest")"
+          cosign verify "$IMAGE@$INDEX_DIGEST" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER"
+          for arch in amd64 arm64; do
+            PLATFORM_DIGEST="$(crane digest --platform "linux/$arch" "$IMAGE:latest")"
+            cosign verify-attestation "$IMAGE@$PLATFORM_DIGEST" \
+              --type spdxjson \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer "$ISSUER"
+          done
+
+      - name: Create immutable release tag (manual only)
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Release tag must look like v1.0.0' >&2
+            exit 1
+          }
+          if crane digest "$IMAGE:$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          INDEX_DIGEST="$(crane digest "$IMAGE:latest")"
+          crane tag "$IMAGE@$INDEX_DIGEST" "$RELEASE_TAG"
