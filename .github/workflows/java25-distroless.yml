@@ -6,7 +6,7 @@ on:
     branches: [main]
     paths:
       - 'apko.yaml'
-      - '.github/workflows/distroless.yml'
+      - '.github/workflows/java25-distroless.yml'
   schedule:
     - cron: '23 2 * * *'
   workflow_dispatch:
@@ -211,7 +211,7 @@ jobs:
 
           DIGEST=$(crane digest "$IMAGE:latest")
 
-          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/distroless.yml@${GITHUB_REF}"
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/java25-distroless.yml@${GITHUB_REF}"
 
           cosign verify \
             "$IMAGE@$DIGEST" \
