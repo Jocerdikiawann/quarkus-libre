@@ -3,8 +3,13 @@ name: CI/CD with Security Scan
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - '.github/workflows/main.yml'
+      - 'Dockerfile'
+      - 'headless.sh'
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
