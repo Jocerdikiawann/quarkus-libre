@@ -83,46 +83,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # - name: Install Syft with retry
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #
-      #     for attempt in 1 2 3 4 5; do
-      #       echo "Installing Syft (attempt $attempt/5)"
-      #
-      #       if curl -fsSL --retry 3 \
-      #         https://get.anchore.io/syft \
-      #         -o /tmp/install-syft.sh &&
-      #         sh /tmp/install-syft.sh \
-      #           -b "$HOME/.local/bin" v1.42.3; then
-      #         break
-      #       fi
-      #
-      #       if [[ "$attempt" -eq 5 ]]; then
-      #         echo "Failed to install Syft"
-      #         exit 1
-      #       fi
-      #
-      #       sleep $((attempt * 10))
-      #     done
-      #
-      #     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      #
-      # - name: Generate SBOM
-      #   shell: bash
-      #   run: |
-      #     syft docker:wolfi-jdk-distroless:ci-amd64 \
-      #       -o spdx-json=sbom.spdx.json
+      - name: Generate SBOM with Syft container
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Generate SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: wolfi-jdk-distroless:ci-amd64
-          syft-version: "v1.57.0"
-          format: spdx-json
-          output-file: sbom.spdx.json
-          upload-artifact: false
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            anchore/syft:v1.56.0 \
+            docker:wolfi-jdk-distroless:ci-amd64 \
+            -o spdx-json=/workspace/sbom.spdx.json
+
+          test -s sbom.spdx.json
+
+          jq -e '.packages | type == "array"' sbom.spdx.json
+
+          echo "SBOM generated successfully."
+
+      # - name: Generate SBOM
+      #   uses: anchore/sbom-action@v0
+      #   with:
+      #     image: wolfi-jdk-distroless:ci-amd64
+      #     syft-version: "v1.57.0"
+      #     format: spdx-json
+      #     output-file: sbom.spdx.json
+      #     upload-artifact: false
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -176,21 +163,33 @@ jobs:
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      # - name: Generate previous image SBOM
-      #   if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
-      #   run: |
-      #     syft "docker:${{ steps.compare.outputs.image }}:latest" \
-      #       -o spdx-json=previous.spdx.json
-
       - name: Generate previous image SBOM
         if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ steps.compare.outputs.image }}:latest
-          format: spdx-json
-          syft-version: "v1.57.0"
-          output-file: previous.spdx.json
-          upload-artifact: false
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            anchore/syft:v1.56.0 \
+            "docker:$IMAGE:latest" \
+            -o spdx-json=/workspace/previous.spdx.json
+
+          test -s previous.spdx.json
+
+      # - name: Generate previous image SBOM
+      #   if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
+      #   uses: anchore/sbom-action@v0
+      #   with:
+      #     image: ${{ steps.compare.outputs.image }}:latest
+      #     format: spdx-json
+      #     syft-version: "v1.57.0"
+      #     output-file: previous.spdx.json
+      #     upload-artifact: false
 
       - name: Compare package versions
         if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
