@@ -125,3 +125,66 @@ jobs:
           path: sbom-*.spdx.json
           retention-days: 30
           if-no-files-found: error
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare both platforms with GHCR
+        id: compare
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${OWNER,,}/wolfi-jdk-distroless"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+          if crane digest "$IMAGE:latest" > remote-digest.txt 2> remote-error.txt; then
+            echo 'remote_exists=true' >> "$GITHUB_OUTPUT"
+          elif grep -Eiq 'MANIFEST_UNKNOWN|NAME_UNKNOWN|404|not found' remote-error.txt; then
+            echo 'remote_exists=false' >> "$GITHUB_OUTPUT"
+            echo 'remote_multi=false' >> "$GITHUB_OUTPUT"
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            echo 'No existing latest image: first publish required.'
+            exit 0
+          else
+            cat remote-error.txt >&2
+            exit 1
+          fi
+
+          remote_index="$(crane manifest "$IMAGE:latest")"
+          if ! jq -e '
+            (.manifests // []) as $m
+            | (["amd64", "arm64"] | all(. as $a |
+                any($m[]; .platform.os == "linux" and .platform.architecture == $a)))
+          ' <<< "$remote_index" >/dev/null; then
+            echo 'remote_multi=false' >> "$GITHUB_OUTPUT"
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            echo 'Remote image is not yet a complete amd64+arm64 index.'
+            exit 0
+          fi
+
+          changed=false
+          remote_multi=true
+          for arch in amd64 arm64; do
+            local_id="$(docker image inspect "wolfi-jdk-distroless:ci-${arch}" --format '{{.Id}}')"
+            if remote_manifest="$(crane manifest --platform "linux/$arch" "$IMAGE:latest" 2> "remote-${arch}-error.txt")"; then
+              remote_id="$(jq -er '.config.digest' <<< "$remote_manifest")"
+              echo "$arch: local=$local_id remote=$remote_id"
+              if [[ "$local_id" != "$remote_id" ]]; then
+                changed=true
+              fi
+            elif grep -Eiq 'no child|no matching|not found|MANIFEST_UNKNOWN|404|platform' "remote-${arch}-error.txt"; then
+              echo "$arch: platform missing in remote image"
+              remote_multi=false
+              changed=true
+            else
+              cat "remote-${arch}-error.txt" >&2
+              exit 1
+            fi
+          done
+          echo "remote_multi=$remote_multi" >> "$GITHUB_OUTPUT"
