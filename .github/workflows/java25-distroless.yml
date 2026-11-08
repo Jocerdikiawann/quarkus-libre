@@ -13,9 +13,11 @@ on:
 
 permissions:
   contents: read
+  packages: write
+  id-token: write
 
 concurrency:
-  group: wolfi-java25-distroless
+  group: wolfi-jdk-distroless
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +26,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,7 +95,7 @@ jobs:
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wolfi-java25-sbom
+          name: wolfi-jdk-distroless-sbom
           path: sbom.spdx.json
           retention-days: 30
           if-no-files-found: error
@@ -131,12 +134,47 @@ jobs:
               echo "Image changed. Publishing required."
             fi
 
+            echo "remote_exists=true" >> "$GITHUB_OUTPUT"
+
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Remote image not found. First publish required."
+            echo "remote_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Generate previous image SBOM
+        if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.compare.outputs.image }}:latest
+          format: spdx-json
+          output-file: previous.spdx.json
+          upload-artifact: false
+
+      - name: Compare package versions
+        if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
+        run: |
+          python3 compare_sbom.py \
+            previous.spdx.json \
+            sbom.spdx.json
+
+          cat package-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload package change report
+        if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfi-package-changes
+          path: package-report.md
+          retention-days: 30
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.0.0
+
+      - name: Check Cosign
+        run: cosign version
 
       - name: Publish changed image
         if: steps.compare.outputs.changed == 'true'
@@ -148,3 +186,35 @@ jobs:
           docker tag wolfi-jdk-distroless:ci-amd64 "$IMAGE:latest"
           docker push "$IMAGE:latest"
           echo "Published $IMAGE:latest"
+
+      - name: Sign image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          DIGEST=$(crane digest "$IMAGE:latest")
+
+          REF="$IMAGE@$DIGEST"
+
+          echo "Signing image: $REF"
+
+          cosign sign --yes "$REF"
+
+      - name: Verify image signature
+        shell: bash
+        env:
+          IMAGE: ${{ steps.compare.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          DIGEST=$(crane digest "$IMAGE:latest")
+
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/distroless.yml@${GITHUB_REF}"
+
+          cosign verify \
+            "$IMAGE@$DIGEST" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer \
+              "https://token.actions.githubusercontent.com"
