@@ -1,32 +1,38 @@
-
 name: Wolfi Java 25 Distroless
 
 on:
   push:
     branches: [main]
     paths:
-      - 'apko.yaml'
-      - '.github/workflows/java25-distroless.yml'
+      - apko.yaml
+      - compare_sbom.py
+      - .github/workflows/java25-distroless.yml
   schedule:
     - cron: '23 2 * * *'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional immutable release tag (for example v1.0.0)'
+        required: false
+        type: string
+
+concurrency:
+  group: wolfi-jdk-distroless-production
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
-
-concurrency:
-  group: wolfi-jdk-distroless
-  cancel-in-progress: false
 
 jobs:
   build-scan-publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       id-token: write
+    env:
+      SYFT_IMAGE: anchore/syft:v1.56.0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,7 +42,6 @@ jobs:
         with:
           go-version: 'stable'
 
-      # Before production, pin these tools to tested release versions.
       - name: Install apko and crane
         shell: bash
         run: |
@@ -45,26 +50,37 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Build image with apko
+      - name: Enable ARM64 emulation
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build both platforms with apko
         shell: bash
         run: |
           set -euo pipefail
-          apko build apko.yaml wolfi-jdk-distroless:ci image.tar --arch x86_64
-          docker load -i image.tar
+          apko build apko.yaml wolfi-jdk-distroless:ci amd64.tar --arch x86_64
+          apko build apko.yaml wolfi-jdk-distroless:ci arm64.tar --arch aarch64
+          docker load -i amd64.tar
+          docker load -i arm64.tar
           docker image inspect wolfi-jdk-distroless:ci-amd64 >/dev/null
+          docker image inspect wolfi-jdk-distroless:ci-arm64 >/dev/null
 
-      - name: Java smoke test
-        run: docker run --rm wolfi-jdk-distroless:ci-amd64
-
-      - name: Verify non-root runtime
+      - name: Smoke test and non-root checks
         shell: bash
         run: |
           set -euo pipefail
-          USER_ID="$(docker image inspect wolfi-jdk-distroless:ci-amd64 --format '{{.Config.User}}')"
-          test "$USER_ID" = '65532' || test "$USER_ID" = 'nonroot'
-          echo "Runtime user: $USER_ID"
+          for arch in amd64 arm64; do
+            ref="wolfi-jdk-distroless:ci-${arch}"
+            echo "Testing $ref"
+            test "$(docker image inspect "$ref" --format '{{.Architecture}}')" = "$arch"
+            uid="$(docker image inspect "$ref" --format '{{.Config.User}}')"
+            [[ "$uid" == '65532' || "$uid" == 'nonroot' ]]
+            docker run --rm --platform "linux/$arch" "$ref"
+          done
 
-      - name: Scan all known vulnerabilities
+      - name: Scan AMD64 vulnerabilities
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: wolfi-jdk-distroless:ci-amd64
@@ -76,186 +92,36 @@ jobs:
           vuln-type: os,library
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - name: Scan ARM64 vulnerabilities
+        uses: aquasecurity/trivy-action@master
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: wolfi-jdk-distroless:ci-arm64
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: '1'
+          ignore-unfixed: false
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
 
-      - name: Generate SBOM with Syft container
+      - name: Generate per-platform SPDX SBOMs
         shell: bash
         run: |
           set -euo pipefail
+          for arch in amd64 arm64; do
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD:/workspace" -w /workspace \
+              "$SYFT_IMAGE" \
+              "docker:wolfi-jdk-distroless:ci-${arch}" \
+              -o "spdx-json=/workspace/sbom-${arch}.spdx.json"
+            jq -e '.packages | type == "array"' "sbom-${arch}.spdx.json" >/dev/null
+          done
 
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            anchore/syft:v1.56.0 \
-            docker:wolfi-jdk-distroless:ci-amd64 \
-            -o spdx-json=/workspace/sbom.spdx.json
-
-          test -s sbom.spdx.json
-
-          jq -e '.packages | type == "array"' sbom.spdx.json
-
-          echo "SBOM generated successfully."
-
-      # - name: Generate SBOM
-      #   uses: anchore/sbom-action@v0
-      #   with:
-      #     image: wolfi-jdk-distroless:ci-amd64
-      #     syft-version: "v1.57.0"
-      #     format: spdx-json
-      #     output-file: sbom.spdx.json
-      #     upload-artifact: false
-
-      - name: Upload SBOM artifact
+      - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wolfi-jdk-distroless-sbom
-          path: sbom.spdx.json
+          name: wolfi-java25-sboms
+          path: sbom-*.spdx.json
           retention-days: 30
           if-no-files-found: error
-
-      - name: Compare local and remote image
-        id: compare
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-
-          IMAGE="ghcr.io/${OWNER,,}/wolfi-jdk-distroless"
-          LOCAL_IMAGE="wolfi-jdk-distroless:ci-amd64"
-
-          LOCAL_ID=$(docker image inspect "$LOCAL_IMAGE" \
-            --format '{{.Id}}')
-
-          echo "Local image ID: $LOCAL_ID"
-
-          if docker manifest inspect "$IMAGE:latest" \
-            >/dev/null 2>&1; then
-
-            docker pull "$IMAGE:latest"
-
-            REMOTE_ID=$(docker image inspect "$IMAGE:latest" \
-              --format '{{.Id}}')
-
-            echo "Remote image ID: $REMOTE_ID"
-
-            if [[ "$LOCAL_ID" == "$REMOTE_ID" ]]; then
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-              echo "Image unchanged. Skipping publish."
-            else
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-              echo "Image changed. Publishing required."
-            fi
-
-            echo "remote_exists=true" >> "$GITHUB_OUTPUT"
-
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Remote image not found. First publish required."
-            echo "remote_exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-
-      - name: Generate previous image SBOM
-        if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.compare.outputs.image }}
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            anchore/syft:v1.56.0 \
-            "docker:$IMAGE:latest" \
-            -o spdx-json=/workspace/previous.spdx.json
-
-          test -s previous.spdx.json
-
-      # - name: Generate previous image SBOM
-      #   if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
-      #   uses: anchore/sbom-action@v0
-      #   with:
-      #     image: ${{ steps.compare.outputs.image }}:latest
-      #     format: spdx-json
-      #     syft-version: "v1.57.0"
-      #     output-file: previous.spdx.json
-      #     upload-artifact: false
-
-      - name: Compare package versions
-        if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
-        run: |
-          python3 compare_sbom.py \
-            previous.spdx.json \
-            sbom.spdx.json
-
-          cat package-report.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload package change report
-        if: steps.compare.outputs.remote_exists == 'true' && steps.compare.outputs.changed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: wolfi-package-changes
-          path: package-report.md
-          retention-days: 30
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v4.0.0
-
-      - name: Check Cosign
-        run: cosign version
-
-      - name: Publish changed image
-        if: github.ref == 'refs/heads/main' && steps.compare.outputs.changed == 'true'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.compare.outputs.image }}
-        run: |
-          set -euo pipefail
-          docker tag wolfi-jdk-distroless:ci-amd64 "$IMAGE:latest"
-          docker push "$IMAGE:latest"
-          echo "Published $IMAGE:latest"
-
-      - name: Sign image
-        if: github.ref == 'refs/heads/main' && steps.compare.outputs.changed == 'true'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.compare.outputs.image }}
-        run: |
-          set -euo pipefail
-
-          DIGEST=$(crane digest "$IMAGE:latest")
-          REF="$IMAGE@$DIGEST"
-
-          echo "Signing: $REF"
-
-          cosign sign --yes "$REF"
-
-      - name: Verify image signature
-        if: github.ref == 'refs/heads/main'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.compare.outputs.image }}
-        run: |
-          set -euo pipefail
-
-          DIGEST=$(crane digest "$IMAGE:latest")
-          REF="$IMAGE@$DIGEST"
-
-          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/java25-distroless.yml@refs/heads/main"
-
-          cosign verify "$REF" \
-            --certificate-identity "$IDENTITY" \
-            --certificate-oidc-issuer \
-              "https://token.actions.githubusercontent.com"
-
-          echo "Signature verified: $REF"
