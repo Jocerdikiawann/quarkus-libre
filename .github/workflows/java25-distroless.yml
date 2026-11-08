@@ -215,7 +215,7 @@ jobs:
         run: cosign version
 
       - name: Publish changed image
-        if: steps.compare.outputs.changed == 'true'
+        if: github.ref == 'refs/heads/main' && steps.compare.outputs.changed == 'true'
         shell: bash
         env:
           IMAGE: ${{ steps.compare.outputs.image }}
@@ -226,6 +226,7 @@ jobs:
           echo "Published $IMAGE:latest"
 
       - name: Sign image
+        if: github.ref == 'refs/heads/main' && steps.compare.outputs.changed == 'true'
         shell: bash
         env:
           IMAGE: ${{ steps.compare.outputs.image }}
@@ -233,14 +234,14 @@ jobs:
           set -euo pipefail
 
           DIGEST=$(crane digest "$IMAGE:latest")
-
           REF="$IMAGE@$DIGEST"
 
-          echo "Signing image: $REF"
+          echo "Signing: $REF"
 
           cosign sign --yes "$REF"
 
       - name: Verify image signature
+        if: github.ref == 'refs/heads/main'
         shell: bash
         env:
           IMAGE: ${{ steps.compare.outputs.image }}
@@ -248,11 +249,13 @@ jobs:
           set -euo pipefail
 
           DIGEST=$(crane digest "$IMAGE:latest")
+          REF="$IMAGE@$DIGEST"
 
-          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/java25-distroless.yml@${GITHUB_REF}"
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/java25-distroless.yml@refs/heads/main"
 
-          cosign verify \
-            "$IMAGE@$DIGEST" \
+          cosign verify "$REF" \
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer \
               "https://token.actions.githubusercontent.com"
+
+          echo "Signature verified: $REF"
